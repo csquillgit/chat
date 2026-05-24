@@ -4,6 +4,15 @@ This Python app listens for the wake words `Hey Max`, records the next spoken ph
 
 It supports Ollama and LM Studio as local LLM backends. On macOS, spoken responses use the built-in `say` command. On other platforms, the app falls back to `pyttsx3`.
 
+## Get The Code
+
+If you do not already have the project on your computer, clone it with Git and move into the project folder:
+
+```bash
+git clone https://github.com/csquillgit/chat.git
+cd chat
+```
+
 ## Setup
 
 Create a Python environment and install the app dependencies:

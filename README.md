@@ -1,22 +1,17 @@
 # Max Local Voice Assistant
 
-This Python app listens for the wake words `Hey Max`, records the next spoken phrase, sends it to a local Ollama server, and speaks the response back.
+This Python app listens for the wake words `Hey Max`, records the next spoken phrase, sends it to a local LLM server, and speaks the response back.
 
-The first version targets Ollama as the local LLM backend. On macOS, spoken responses use the built-in `say` command. On other platforms, the app falls back to `pyttsx3`.
+It supports Ollama and LM Studio as local LLM backends. On macOS, spoken responses use the built-in `say` command. On other platforms, the app falls back to `pyttsx3`.
 
 ## Setup
+
+Create a Python environment and install the app dependencies:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
-```
-
-Install and run Ollama, then pull a model:
-
-```bash
-ollama pull llama3.2
-ollama serve
 ```
 
 Download a Vosk speech-recognition model from https://alphacephei.com/vosk/models and unzip it locally. A small English model is enough to start. For example:
@@ -28,16 +23,45 @@ unzip vosk-model-small-en-us-0.15.zip
 
 The model folder passed to `--vosk-model` should contain directories named `am`, `conf`, and `graph`.
 
-## Run
+## Run With Ollama
+
+In one terminal, pull a model and start Ollama:
+
+```bash
+ollama your-loaded-model-id
+ollama serve
+```
+
+In another terminal, start Max:
 
 ```bash
 python3 jarvis.py \
+  --llm-provider ollama \
   --llm-url http://localhost:11434 \
-  --ollama-model llama3.2 \
+  --llm-model your-loaded-model-id \
   --vosk-model ./vosk-model-small-en-us-0.15
 ```
 
-Say `Hey Max`, wait for `Yes?`, then ask your question. You can also say the prompt in one phrase, such as `Hey Max what time is it`.
+## Run With LM Studio
+
+In LM Studio:
+
+1. Download a chat model.
+2. Start the local server from the Developer tab.
+3. Copy the model identifier shown by LM Studio.
+
+Then start Max:
+
+```bash
+python3 jarvis.py \
+  --llm-provider lmstudio \
+  --llm-url http://localhost:1234 \
+  --llm-model your-loaded-model-id \
+  --vosk-model ./vosk-model-small-en-us-0.15
+```
+
+Say `Hey Max`, wait for `Yes?`, then ask your question.
+You can also just say the prompt in one phrase, such as `Hey Max what time is it`.
 
 ## Useful Options
 
@@ -50,17 +74,27 @@ python3 -m sounddevice
 Then pass the input device index:
 
 ```bash
-python3 jarvis.py --llm-url http://localhost:11434 --vosk-model ./vosk-model-small-en-us-0.15 --device 1
+python3 jarvis.py \
+  --llm-provider ollama \
+  --llm-url http://localhost:11434 \
+  --llm-model llama3.2 \
+  --vosk-model ./vosk-model-small-en-us-0.15 \
+  --device 1
 ```
 
 Change the Ollama model:
 
 ```bash
 python3 jarvis.py \
+  --llm-provider ollama \
   --llm-url http://localhost:11434 \
-  --ollama-model mistral \
+  --llm-model mistral \
   --vosk-model ./vosk-model-small-en-us-0.15
 ```
+
+For LM Studio, change `--llm-model` to the model identifier shown in LM Studio.
+
+The old `--ollama-model` flag still works for Ollama, but `--llm-model` is preferred.
 
 ## Troubleshooting
 

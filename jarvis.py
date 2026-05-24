@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Voice assistant that wakes on "Hey Max" and sends prompts to Ollama."""
+"""Voice assistant that wakes on "Hey Max" and sends prompts to a local LLM."""
 
 from __future__ import annotations
 
@@ -60,8 +60,9 @@ class TextSpeaker:
 
 @dataclass(frozen=True)
 class Config:
+    llm_provider: str
     llm_url: str
-    ollama_model: str
+    llm_model: str
     vosk_model_path: str
     sample_rate: int
     device: int | None
@@ -129,7 +130,7 @@ class JarvisAssistant:
 
     def respond_to(self, prompt: str) -> None:
         try:
-            response = self.ask_ollama(prompt)
+            response = self.ask_llm(prompt)
         except requests.RequestException as exc:
             print(f"LLM request failed: {exc}", file=sys.stderr)
             self.say("I could not reach the local language model.")
@@ -138,23 +139,49 @@ class JarvisAssistant:
         print(f"Jarvis: {response}")
         self.say(response)
 
+    def ask_llm(self, prompt: str) -> str:
+        if self.config.llm_provider == "ollama":
+            return self.ask_ollama(prompt)
+        if self.config.llm_provider == "lmstudio":
+            return self.ask_lmstudio(prompt)
+        raise ValueError(f"Unsupported LLM provider: {self.config.llm_provider}")
+
+    def chat_messages(self, prompt: str) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": "You are Jarvis, a concise and helpful voice assistant.",
+            },
+            {"role": "user", "content": prompt},
+        ]
+
     def ask_ollama(self, prompt: str) -> str:
         endpoint = self.config.llm_url.rstrip("/") + "/api/chat"
         payload = {
-            "model": self.config.ollama_model,
+            "model": self.config.llm_model,
             "stream": False,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are Jarvis, a concise and helpful voice assistant.",
-                },
-                {"role": "user", "content": prompt},
-            ],
+            "messages": self.chat_messages(prompt),
         }
         response = requests.post(endpoint, json=payload, timeout=self.config.timeout)
         response.raise_for_status()
         data = response.json()
         return data.get("message", {}).get("content", "").strip() or "I have no response."
+
+    def ask_lmstudio(self, prompt: str) -> str:
+        endpoint = self.config.llm_url.rstrip("/") + "/v1/chat/completions"
+        payload = {
+            "model": self.config.llm_model,
+            "messages": self.chat_messages(prompt),
+            "temperature": 0.7,
+            "stream": False,
+        }
+        response = requests.post(endpoint, json=payload, timeout=self.config.timeout)
+        response.raise_for_status()
+        data = response.json()
+        choices = data.get("choices", [])
+        if choices:
+            return choices[0].get("message", {}).get("content", "").strip() or "I have no response."
+        return "I have no response."
 
     def say(self, text: str) -> None:
         self.speaker.say(text)
@@ -202,17 +229,31 @@ def is_vosk_model_dir(path: Path) -> bool:
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(
-        description='Listen for "Hey Max", send speech to Ollama, and speak the response.'
+        description='Listen for "Hey Max", send speech to a local LLM, and speak the response.'
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=("ollama", "lmstudio"),
+        default="ollama",
+        help="Local LLM backend to use. Default: ollama",
     )
     parser.add_argument(
         "--llm-url",
         required=True,
-        help="Base URL for Ollama, for example http://localhost:11434",
+        help=(
+            "Base URL for the local LLM server, for example http://localhost:11434 "
+            "for Ollama or http://localhost:1234 for LM Studio."
+        ),
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=None,
+        help="Model name to use. Defaults to llama3.2 for Ollama. Required for LM Studio.",
     )
     parser.add_argument(
         "--ollama-model",
-        default="llama3.2",
-        help="Ollama model name to use. Default: llama3.2",
+        default=None,
+        help="Deprecated alias for --llm-model when using Ollama.",
     )
     parser.add_argument(
         "--vosk-model",
@@ -235,13 +276,19 @@ def parse_args() -> Config:
         "--timeout",
         type=int,
         default=120,
-        help="Ollama request timeout in seconds. Default: 120",
+        help="LLM request timeout in seconds. Default: 120",
     )
     args = parser.parse_args()
+    llm_model = args.llm_model or args.ollama_model
+    if not llm_model:
+        if args.llm_provider == "lmstudio":
+            raise SystemExit("--llm-model is required when --llm-provider is lmstudio.")
+        llm_model = "llama3.2"
 
     return Config(
+        llm_provider=args.llm_provider,
         llm_url=args.llm_url,
-        ollama_model=args.ollama_model,
+        llm_model=llm_model,
         vosk_model_path=args.vosk_model,
         sample_rate=args.sample_rate,
         device=args.device,

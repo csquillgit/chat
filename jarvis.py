@@ -10,6 +10,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -77,10 +79,13 @@ class JarvisAssistant:
         self.recognizer = KaldiRecognizer(self.model, config.sample_rate)
         self.speaker = TextSpeaker()
         self.running = True
+        self.speaking = threading.Event()
 
     def audio_callback(self, indata: bytes, frames: int, time, status) -> None:  # noqa: ANN001
         if status:
             print(f"Audio warning: {status}", file=sys.stderr)
+        if self.speaking.is_set():
+            return
         self.audio_queue.put(bytes(indata))
 
     def listen(self) -> Iterable[str]:
@@ -97,6 +102,8 @@ class JarvisAssistant:
                 data = self.audio_queue.get()
                 if not self.running:
                     break
+                if self.speaking.is_set():
+                    continue
                 if self.recognizer.AcceptWaveform(data):
                     result = json.loads(self.recognizer.Result())
                     text = normalize(result.get("text", ""))
@@ -184,11 +191,25 @@ class JarvisAssistant:
         return "I have no response."
 
     def say(self, text: str) -> None:
-        self.speaker.say(text)
+        self.speaking.set()
+        try:
+            self.speaker.say(text)
+        finally:
+            time.sleep(0.25)
+            self.discard_pending_audio()
+            self.recognizer.Reset()
+            self.speaking.clear()
 
     def stop(self) -> None:
         self.running = False
         self.audio_queue.put(b"")
+
+    def discard_pending_audio(self) -> None:
+        while True:
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
 
 
 def normalize(text: str) -> str:

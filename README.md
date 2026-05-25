@@ -1,6 +1,6 @@
 # Max Local Voice Assistant
 
-This Python app listens continuously while it is running, sends recognized speech to a local LLM server, and speaks the response back.
+This Python app listens continuously while it is running, sends recognized speech to a local LLM server, and speaks the response back. By default it opens a small desktop UI with a live transcript, status updates, and an animated audio wave.
 
 It supports Ollama and LM Studio as local LLM backends. On macOS, spoken responses use the built-in `say` command. On other platforms, the app falls back to `pyttsx3`.
 
@@ -69,7 +69,18 @@ python3 jarvis.py \
   --vosk-model ./vosk-model-small-en-us-0.15
 ```
 
-Once the app is running, speak your prompt directly.
+Once the app is running, speak your prompt directly. The desktop window shows what it heard, the model response, and voice activity while you or Max are speaking.
+
+To use the original terminal transcript instead of the desktop UI, add `--console`:
+
+```bash
+python3 jarvis.py \
+  --console \
+  --llm-provider lmstudio \
+  --llm-url http://localhost:1234 \
+  --llm-model your-loaded-model-id \
+  --vosk-model ./vosk-model-small-en-us-0.15
+```
 
 ## Useful Options
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Voice assistant that wakes on "Hey Max" and sends prompts to a local LLM."""
+"""Voice assistant that listens continuously and sends prompts to a local LLM."""
 
 from __future__ import annotations
 
@@ -34,9 +34,6 @@ try:
     import pyttsx3
 except ModuleNotFoundError:
     pyttsx3 = None
-
-
-WAKE_WORDS = "hey max"
 
 
 class TextSpeaker:
@@ -97,7 +94,7 @@ class JarvisAssistant:
             callback=self.audio_callback,
             device=self.config.device,
         ):
-            print('Listening. Say "Hey Max" to start.')
+            print("Listening. Speak to ask a question.")
             while self.running:
                 data = self.audio_queue.get()
                 if not self.running:
@@ -111,29 +108,9 @@ class JarvisAssistant:
                         yield text
 
     def run(self) -> None:
-        waiting_for_prompt = False
-
         for text in self.listen():
             print(f"Heard: {text}")
-
-            if not waiting_for_prompt:
-                if WAKE_WORDS in text:
-                    prompt = remove_wake_words(text)
-                    if prompt:
-                        self.respond_to(prompt)
-                    else:
-                        waiting_for_prompt = True
-                        self.say("Yes?")
-                    continue
-                continue
-
-            prompt = remove_wake_words(text)
-            if not prompt:
-                self.say("I'm listening.")
-                continue
-
-            waiting_for_prompt = False
-            self.respond_to(prompt)
+            self.respond_to(text)
 
     def respond_to(self, prompt: str) -> None:
         try:
@@ -216,10 +193,6 @@ def normalize(text: str) -> str:
     return " ".join(text.lower().strip().split())
 
 
-def remove_wake_words(text: str) -> str:
-    return normalize(text.replace(WAKE_WORDS, "", 1))
-
-
 def resolve_vosk_model_path(model_path: str) -> Path:
     path = Path(model_path).expanduser().resolve()
     if is_vosk_model_dir(path):
@@ -250,7 +223,7 @@ def is_vosk_model_dir(path: Path) -> bool:
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(
-        description='Listen for "Hey Max", send speech to a local LLM, and speak the response.'
+        description="Listen continuously, send speech to a local LLM, and speak the response."
     )
     parser.add_argument(
         "--llm-provider",

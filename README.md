@@ -1,6 +1,6 @@
 # Max Local Voice Assistant
 
-This Python app listens for the wake words `Hey Max`, records the next spoken phrase, sends it to a local LLM server, and speaks the response back.
+This Python app listens continuously while it is running, sends recognized speech to a local LLM server, and speaks the response back.
 
 It supports Ollama and LM Studio as local LLM backends. On macOS, spoken responses use the built-in `say` command. On other platforms, the app falls back to `pyttsx3`.
 
@@ -69,8 +69,7 @@ python3 jarvis.py \
   --vosk-model ./vosk-model-small-en-us-0.15
 ```
 
-Say `Hey Max`, wait for `Yes?`, then ask your question.
-You can also just say the prompt in one phrase, such as `Hey Max what time is it`.
+Once the app is running, speak your prompt directly.
 
 ## Useful Options
 

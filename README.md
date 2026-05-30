@@ -1,4 +1,4 @@
-# Max Local Voice Assistant
+# Jarvis Local Voice Assistant
 
 This Python app listens continuously while it is running, sends recognized speech to a local LLM server, and speaks the response back. By default it opens a small desktop UI with a live transcript, status updates, and an animated audio wave.
 
@@ -41,7 +41,7 @@ ollama your-loaded-model-id
 ollama serve
 ```
 
-In another terminal, start Max:
+In another terminal, start Jarvis:
 
 ```bash
 python3 jarvis.py \
@@ -59,7 +59,7 @@ In LM Studio:
 2. Start the local server from the Developer tab.
 3. Copy the model identifier shown by LM Studio.
 
-Then start Max:
+Then start Jarvis:
 
 ```bash
 python3 jarvis.py \
@@ -69,7 +69,7 @@ python3 jarvis.py \
   --vosk-model ./vosk-model-small-en-us-0.15
 ```
 
-Once the app is running, speak your prompt directly. The desktop window shows what it heard, the model response, and voice activity while you or Max are speaking.
+Once the app is running, speak your prompt directly. The desktop window shows what it heard, the model response, and voice activity while you or Jarvis are speaking.
 
 To use the original terminal transcript instead of the desktop UI, add `--console`:
 

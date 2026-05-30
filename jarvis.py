@@ -88,11 +88,13 @@ class JarvisAssistant:
         self.speaker = TextSpeaker()
         self.running = True
         self.speaking = threading.Event()
+        self.listening_enabled = threading.Event()
+        self.listening_enabled.set()
 
     def audio_callback(self, indata: bytes, frames: int, time, status) -> None:  # noqa: ANN001
         if status:
             self.emit("warning", f"Audio warning: {status}")
-        if self.speaking.is_set():
+        if self.speaking.is_set() or not self.listening_enabled.is_set():
             return
         data = bytes(indata)
         self.emit("audio_level", audio_level(data))
@@ -108,12 +110,12 @@ class JarvisAssistant:
             callback=self.audio_callback,
             device=self.config.device,
         ):
-            self.emit("status", "Listening")
+            self.emit("status", "Listening" if self.listening_enabled.is_set() else "Paused")
             while self.running:
                 data = self.audio_queue.get()
                 if not self.running:
                     break
-                if self.speaking.is_set():
+                if self.speaking.is_set() or not self.listening_enabled.is_set():
                     continue
                 if self.recognizer.AcceptWaveform(data):
                     result = json.loads(self.recognizer.Result())
@@ -139,7 +141,7 @@ class JarvisAssistant:
 
         self.emit("assistant_message", response)
         self.say(response)
-        self.emit("status", "Listening")
+        self.emit("status", "Listening" if self.listening_enabled.is_set() else "Paused")
 
     def ask_llm(self, prompt: str) -> str:
         if self.config.llm_provider == "ollama":
@@ -197,6 +199,29 @@ class JarvisAssistant:
             self.speaking.clear()
             self.emit("speaking", "stop")
 
+    def set_listening_enabled(self, enabled: bool) -> None:
+        if enabled:
+            self.discard_pending_audio()
+            self.recognizer.Reset()
+            self.listening_enabled.set()
+            self.emit("listening_enabled", True)
+            self.emit("status", "Listening")
+            return
+
+        self.listening_enabled.clear()
+        self.discard_pending_audio()
+        self.recognizer.Reset()
+        self.emit("listening_enabled", False)
+        self.emit("status", "Paused")
+
+    def toggle_listening(self) -> bool:
+        enabled = not self.listening_enabled.is_set()
+        self.set_listening_enabled(enabled)
+        return enabled
+
+    def is_listening_enabled(self) -> bool:
+        return self.listening_enabled.is_set()
+
     def stop(self) -> None:
         self.running = False
         self.audio_queue.put(b"")
@@ -215,6 +240,8 @@ class JarvisAssistant:
 
         if kind == "status" and value == "Listening":
             print("Listening. Speak to ask a question.")
+        elif kind == "status" and value == "Paused":
+            print("Listening paused.")
         elif kind == "user_message":
             print(f"Heard: {value}")
         elif kind == "assistant_message":
@@ -310,6 +337,27 @@ class JarvisUI:
         self.status_label = QtWidgets.QLabel(self.status)
         self.status_label.setStyleSheet("background: #111827; color: #a7f3d0; font-size: 12px; font-weight: 700;")
         header_layout.addWidget(self.status_label)
+
+        self.listen_button = QtWidgets.QPushButton()
+        self.listen_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.listen_button.setStyleSheet(
+            """
+            QPushButton {
+                background: #f9fafb;
+                color: #111827;
+                border: 0;
+                padding: 7px 12px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: #e5e7eb;
+            }
+            """
+        )
+        self.listen_button.clicked.connect(self.toggle_listening)
+        header_layout.addWidget(self.listen_button)
+        self.update_listen_button()
         shell.addWidget(header)
 
         self.wave = WaveWidget(self)
@@ -386,7 +434,7 @@ class JarvisUI:
             else:
                 self.wave_mode = "idle"
                 self.audio_strength = 0.0
-                self.set_status("Listening")
+                self.set_status("Listening" if self.assistant.is_listening_enabled() else "Paused")
         elif event.kind == "audio_level":
             level = float(event.value)
             self.audio_strength = max(self.audio_strength * 0.6, level)
@@ -395,10 +443,28 @@ class JarvisUI:
                 self.last_user_audio = time.monotonic()
                 if self.status not in {"Processing", "Speaking", "Error"}:
                     self.set_status("Listening")
+        elif event.kind == "listening_enabled":
+            self.update_listen_button()
+            if not bool(event.value):
+                self.wave_mode = "idle"
+                self.audio_strength = 0.0
+                self.wave.update()
 
     def set_status(self, status: str) -> None:
         self.status = status
         self.status_label.setText(status)
+        self.update_listen_button()
+
+    def toggle_listening(self) -> None:
+        self.assistant.toggle_listening()
+
+    def update_listen_button(self) -> None:
+        if self.assistant.is_listening_enabled():
+            self.listen_button.setText("Stop listening")
+            self.listen_button.setToolTip("Pause microphone recognition")
+        else:
+            self.listen_button.setText("Start listening")
+            self.listen_button.setToolTip("Resume microphone recognition")
 
     def add_message(self, speaker: str, text: str, role: str) -> None:
         QtCore = self.QtCore

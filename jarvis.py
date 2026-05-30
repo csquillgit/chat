@@ -288,7 +288,7 @@ class JarvisUI:
                 wave_self.ui.paint_wave(wave_self)
 
         self.window = QtWidgets.QWidget()
-        self.window.setWindowTitle("Max Voice Assistant")
+        self.window.setWindowTitle("Jarvis Voice Assistant")
         self.window.resize(760, 620)
         self.window.setMinimumSize(520, 460)
         self.window.setStyleSheet(
@@ -329,7 +329,7 @@ class JarvisUI:
         header_layout = QtWidgets.QHBoxLayout(header)
         header_layout.setContentsMargins(18, 14, 18, 14)
 
-        title = QtWidgets.QLabel("Max")
+        title = QtWidgets.QLabel("Jarvis")
         title.setStyleSheet("background: #111827; color: #f9fafb; font-size: 22px; font-weight: 700;")
         header_layout.addWidget(title)
         header_layout.addStretch(1)

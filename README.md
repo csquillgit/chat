@@ -71,6 +71,8 @@ python3 jarvis.py \
 
 Once the app is running, speak your prompt directly. The desktop window shows what it heard, the model response, and voice activity while you or Jarvis are speaking.
 
+Use the Interrupt button to stop the current Jarvis response before it finishes.
+
 To use the original terminal transcript instead of the desktop UI, add `--console`:
 
 ```bash

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import array
+import collections
 import json
 import math
 import queue
@@ -16,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 try:
     import requests
@@ -74,7 +75,7 @@ class Config:
 @dataclass(frozen=True)
 class AssistantEvent:
     kind: str
-    value: str | float
+    value: Any
 
 
 class JarvisAssistant:
@@ -95,6 +96,7 @@ class JarvisAssistant:
             return
         data = bytes(indata)
         self.emit("audio_level", audio_level(data))
+        self.emit("audio_data", bytes(data))
         self.audio_queue.put(data)
 
     def listen(self) -> Iterable[str]:
@@ -206,7 +208,7 @@ class JarvisAssistant:
             except queue.Empty:
                 break
 
-    def emit(self, kind: str, value: str | float) -> None:
+    def emit(self, kind: str, value: Any) -> None:
         if self.events is not None:
             self.events.put(AssistantEvent(kind, value))
             return
@@ -223,14 +225,21 @@ class JarvisAssistant:
 
 class JarvisUI:
     def __init__(self, assistant: JarvisAssistant, events: queue.Queue[AssistantEvent]) -> None:
-        import tkinter as tk
-        from tkinter import ttk
+        try:
+            from PySide6 import QtCore, QtGui, QtWidgets
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "PySide6 is required for the desktop UI. Install dependencies with: "
+                "python3 -m pip install -r requirements.txt"
+            ) from exc
 
-        self.tk = tk
-        self.ttk = ttk
+        self.QtCore = QtCore
+        self.QtGui = QtGui
+        self.QtWidgets = QtWidgets
         self.assistant = assistant
         self.events = events
         self.worker: threading.Thread | None = None
+        self.pcm_buffer: collections.deque[int] = collections.deque(maxlen=24000)
         self.closed = False
         self.status = "Starting"
         self.wave_mode = "idle"
@@ -238,72 +247,101 @@ class JarvisUI:
         self.last_user_audio = 0.0
         self.phase = 0.0
 
-        self.root = tk.Tk()
-        self.root.title("Max Voice Assistant")
-        self.root.geometry("760x620")
-        self.root.minsize(520, 460)
-        self.root.configure(bg="#f5f7fb")
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
+        self.app.aboutToQuit.connect(self.close)
 
-        style = ttk.Style()
-        style.configure("Shell.TFrame", background="#f5f7fb")
-        style.configure("Header.TFrame", background="#111827")
-        style.configure("Header.TLabel", background="#111827", foreground="#f9fafb")
-        style.configure("Status.TLabel", background="#111827", foreground="#a7f3d0")
+        class WaveWidget(QtWidgets.QWidget):
+            def __init__(wave_self, ui: JarvisUI) -> None:
+                super().__init__()
+                wave_self.ui = ui
+                wave_self.setMinimumHeight(110)
+                wave_self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
 
-        shell = ttk.Frame(self.root, style="Shell.TFrame", padding=18)
-        shell.pack(fill="both", expand=True)
+            def paintEvent(wave_self, event) -> None:  # noqa: ANN001
+                wave_self.ui.paint_wave(wave_self)
 
-        header = ttk.Frame(shell, style="Header.TFrame", padding=(18, 14))
-        header.pack(fill="x")
-
-        title = ttk.Label(header, text="Max", style="Header.TLabel", font=("Helvetica", 22, "bold"))
-        title.pack(side="left")
-
-        self.status_label = ttk.Label(
-            header,
-            text=self.status,
-            style="Status.TLabel",
-            font=("Helvetica", 12, "bold"),
+        self.window = QtWidgets.QWidget()
+        self.window.setWindowTitle("Max Voice Assistant")
+        self.window.resize(760, 620)
+        self.window.setMinimumSize(520, 460)
+        self.window.setStyleSheet(
+            """
+            QWidget {
+                background: #f5f7fb;
+                color: #111827;
+                font-family: Helvetica, Arial, sans-serif;
+            }
+            QScrollArea {
+                border: 0;
+                background: #f5f7fb;
+            }
+            QScrollArea > QWidget > QWidget {
+                background: #f5f7fb;
+            }
+            QScrollBar:vertical {
+                background: #f5f7fb;
+                width: 12px;
+            }
+            QScrollBar::handle:vertical {
+                background: #cbd5e1;
+                min-height: 28px;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            """
         )
-        self.status_label.pack(side="right")
 
-        self.wave = tk.Canvas(
-            shell,
-            height=110,
-            bg="#111827",
-            highlightthickness=0,
-            bd=0,
-        )
-        self.wave.pack(fill="x", pady=(0, 14))
+        shell = QtWidgets.QVBoxLayout(self.window)
+        shell.setContentsMargins(18, 18, 18, 18)
+        shell.setSpacing(14)
 
-        self.transcript_canvas = tk.Canvas(
-            shell,
-            bg="#f5f7fb",
-            highlightthickness=0,
-            bd=0,
-        )
-        self.scrollbar = ttk.Scrollbar(shell, orient="vertical", command=self.transcript_canvas.yview)
-        self.messages = ttk.Frame(self.transcript_canvas, style="Shell.TFrame")
-        self.messages_window = self.transcript_canvas.create_window(
-            (0, 0),
-            window=self.messages,
-            anchor="nw",
-        )
-        self.transcript_canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.transcript_canvas.pack(side="left", fill="both", expand=True)
-        self.scrollbar.pack(side="right", fill="y")
-        self.messages.bind("<Configure>", self.on_messages_configure)
-        self.transcript_canvas.bind("<Configure>", self.on_canvas_configure)
+        header = QtWidgets.QFrame()
+        header.setStyleSheet("background: #111827;")
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 14, 18, 14)
+
+        title = QtWidgets.QLabel("Max")
+        title.setStyleSheet("background: #111827; color: #f9fafb; font-size: 22px; font-weight: 700;")
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+
+        self.status_label = QtWidgets.QLabel(self.status)
+        self.status_label.setStyleSheet("background: #111827; color: #a7f3d0; font-size: 12px; font-weight: 700;")
+        header_layout.addWidget(self.status_label)
+        shell.addWidget(header)
+
+        self.wave = WaveWidget(self)
+        self.wave.setStyleSheet("background: #111827;")
+        shell.addWidget(self.wave)
+
+        self.scroll_area = QtWidgets.QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self.messages = QtWidgets.QWidget()
+        self.messages_layout = QtWidgets.QVBoxLayout(self.messages)
+        self.messages_layout.setContentsMargins(0, 0, 0, 0)
+        self.messages_layout.setSpacing(12)
+        self.messages_layout.addStretch(1)
+        self.scroll_area.setWidget(self.messages)
+        shell.addWidget(self.scroll_area, 1)
+
+        self.poll_timer = QtCore.QTimer()
+        self.poll_timer.timeout.connect(self.poll_events)
+        self.wave_timer = QtCore.QTimer()
+        self.wave_timer.timeout.connect(self.animate_wave)
 
         self.add_message("Jarvis", "Listening. Speak to ask a question.", "assistant")
 
     def start(self) -> None:
         self.worker = threading.Thread(target=self.run_assistant, daemon=True)
         self.worker.start()
-        self.root.after(50, self.poll_events)
-        self.root.after(40, self.animate_wave)
-        self.root.mainloop()
+        self.poll_timer.start(50)
+        self.wave_timer.start(40)
+        self.window.show()
+        self.app.exec()
 
     def run_assistant(self) -> None:
         try:
@@ -312,17 +350,22 @@ class JarvisUI:
             self.events.put(AssistantEvent("error", f"Assistant stopped: {exc}"))
 
     def poll_events(self) -> None:
-        while True:
+        for _ in range(100):
             try:
                 event = self.events.get_nowait()
             except queue.Empty:
                 break
             self.handle_event(event)
 
-        if not self.closed:
-            self.root.after(50, self.poll_events)
-
     def handle_event(self, event: AssistantEvent) -> None:
+        if event.kind == "audio_data":
+            raw = event.value
+            if isinstance(raw, bytes):
+                samples = array.array("h")
+                samples.frombytes(raw[: len(raw) - (len(raw) % 2)])
+                self.pcm_buffer.extend(samples)
+            return
+
         value = str(event.value)
         if event.kind == "status":
             self.set_status(value)
@@ -355,52 +398,385 @@ class JarvisUI:
 
     def set_status(self, status: str) -> None:
         self.status = status
-        self.status_label.configure(text=status)
+        self.status_label.setText(status)
 
     def add_message(self, speaker: str, text: str, role: str) -> None:
+        QtCore = self.QtCore
+        QtWidgets = self.QtWidgets
+        colors = {
+            "user": ("#2563eb", "#ffffff", QtCore.Qt.AlignmentFlag.AlignRight),
+            "assistant": ("#ffffff", "#111827", QtCore.Qt.AlignmentFlag.AlignLeft),
+            "system": ("#fee2e2", "#991b1b", QtCore.Qt.AlignmentFlag.AlignLeft),
+        }
+        bg, fg, alignment = colors[role]
+
+        row = QtWidgets.QWidget()
+        row_layout = QtWidgets.QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+
+        bubble = QtWidgets.QFrame()
+        bubble.setMaximumWidth(520)
+        bubble.setStyleSheet(f"background: {bg}; border: 1px solid #e5e7eb;")
+        bubble_layout = QtWidgets.QVBoxLayout(bubble)
+        bubble_layout.setContentsMargins(14, 10, 14, 10)
+        bubble_layout.setSpacing(4)
+
+        name = QtWidgets.QLabel(speaker)
+        name.setStyleSheet(f"background: {bg}; color: {fg}; font-size: 10px; font-weight: 700;")
+        bubble_layout.addWidget(name)
+
+        body = QtWidgets.QLabel(text)
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        body.setStyleSheet(f"background: {bg}; color: {fg}; font-size: 13px;")
+        bubble_layout.addWidget(body)
+
+        if alignment == QtCore.Qt.AlignmentFlag.AlignRight:
+            row_layout.addStretch(1)
+            row_layout.addWidget(bubble)
+        else:
+            row_layout.addWidget(bubble)
+            row_layout.addStretch(1)
+
+        insert_at = max(0, self.messages_layout.count() - 1)
+        self.messages_layout.insertWidget(insert_at, row)
+        QtCore.QTimer.singleShot(0, self.scroll_to_bottom)
+
+    def animate_wave(self) -> None:
+        if self.wave_mode == "user" and time.monotonic() - self.last_user_audio > 1.0:
+            self.wave_mode = "idle"
+            self.audio_strength = 0.0
+        if self.wave_mode == "idle":
+            self.audio_strength *= 0.85
+        self.phase += 0.23
+        self.wave.update()
+
+    def paint_wave(self, widget) -> None:  # noqa: ANN001
+        QtCore = self.QtCore
+        QtGui = self.QtGui
+        width = max(1, widget.width())
+        height = max(1, widget.height())
+
+        painter = QtGui.QPainter(widget)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.fillRect(widget.rect(), QtGui.QColor("#111827"))
+
+        center = height / 2
+        amplitude = self.current_amplitude(height)
+        color = "#60a5fa" if self.wave_mode == "user" else "#34d399"
+        if self.wave_mode == "idle":
+            color = "#475569"
+
+        path = QtGui.QPainterPath()
+        step = max(4, int(width / 50))
+        points: list[tuple[float, float]] = []
+        if self.wave_mode == "user" and self.pcm_buffer:
+            samples = list(self.pcm_buffer)
+            if len(samples) > 1:
+                for x in range(0, width + step, step):
+                    idx = min(int((x / width) * (len(samples) - 1)), len(samples) - 1)
+                    y = center - (samples[idx] / 32768) * amplitude
+                    points.append((float(x), y))
+        if not points:
+            for x in range(0, width + step, step):
+                progress = x / max(width, 1)
+                wave = math.sin((progress * math.pi * 4) + self.phase)
+                shimmer = math.sin((progress * math.pi * 11) - (self.phase * 0.7)) * 0.35
+                y = center + (wave * 0.6 + shimmer * 0.3) * amplitude
+                points.append((float(x), y))
+
+        if points:
+            path.moveTo(points[0][0], points[0][1])
+            for x, y in points[1:]:
+                path.lineTo(x, y)
+            pen = QtGui.QPen(QtGui.QColor(color), 4)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawPath(path)
+
+        painter.setPen(QtGui.QColor("#cbd5e1"))
+        painter.setFont(QtGui.QFont("Helvetica", 11, QtGui.QFont.Weight.Bold))
+        painter.drawText(18, 26, self.wave_label())
+        painter.end()
+
+    def current_amplitude(self, height: int) -> float:
+        if self.wave_mode == "assistant":
+            pulse = (math.sin(self.phase * 0.9) + 1) / 2
+            return height * (0.14 + pulse * 0.18)
+        if self.wave_mode == "user":
+            return height * min(0.34, 0.08 + self.audio_strength * 0.7)
+        return height * max(0.02, min(0.06, self.audio_strength * 0.35))
+
+    def wave_label(self) -> str:
+        if self.wave_mode == "assistant":
+            return "Jarvis speaking"
+        if self.wave_mode == "user":
+            return "Listening"
+        return self.status
+
+    def scroll_to_bottom(self) -> None:
+        scrollbar = self.scroll_area.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.poll_timer.stop()
+        self.wave_timer.stop()
+        self.assistant.stop()
+
+
+class JarvisTkUI:
+    def __init__(self, assistant: JarvisAssistant, events: queue.Queue[AssistantEvent]) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        self.tk = tk
+        self.ttk = ttk
+        self.assistant = assistant
+        self.events = events
+        self.worker: threading.Thread | None = None
+        self.pcm_buffer: collections.deque[int] = collections.deque(maxlen=24000)
+        self.transcript: list[tuple[str, str, str]] = []
+        self.closed = False
+        self.status = "Starting"
+        self.wave_mode = "idle"
+        self.audio_strength = 0.0
+        self.last_user_audio = 0.0
+        self.phase = 0.0
+        self.transcript_height = 1
+
+        self.root = tk.Tk()
+        self.root.title("Max Voice Assistant")
+        self.root.geometry("760x620")
+        self.root.minsize(520, 460)
+        self.root.configure(bg="#f5f7fb")
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+        shell = tk.Frame(self.root, bg="#f5f7fb")
+        shell.pack(fill="both", expand=True, padx=18, pady=18)
+
+        self.header = tk.Canvas(
+            shell,
+            height=66,
+            bg="#111827",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.header.pack(fill="x")
+        self.header.bind("<Configure>", self.render_header)
+        self.status_text = self.header.create_text(
+            0,
+            0,
+            anchor="e",
+            text=self.status,
+            fill="#a7f3d0",
+            font=("Helvetica", 12, "bold"),
+        )
+
+        self.wave = tk.Canvas(
+            shell,
+            height=110,
+            bg="#111827",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.wave.pack(fill="x", pady=(0, 14))
+
+        body = tk.Frame(shell, bg="#f5f7fb")
+        body.pack(fill="both", expand=True)
+
+        self.transcript_canvas = tk.Canvas(
+            body,
+            bg="#f5f7fb",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.transcript_canvas.yview)
+        self.transcript_canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.transcript_canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+        self.transcript_canvas.bind("<Configure>", self.on_canvas_configure)
+
+        self.add_message("Jarvis", "Listening. Speak to ask a question.", "assistant")
+        self.root.update_idletasks()
+
+    def start(self) -> None:
+        self.worker = threading.Thread(target=self.run_assistant, daemon=True)
+        self.worker.start()
+        self.root.after(50, self.poll_events)
+        self.root.after(40, self.animate_wave)
+        self.root.mainloop()
+
+    def run_assistant(self) -> None:
+        try:
+            self.assistant.run()
+        except Exception as exc:  # noqa: BLE001
+            self.events.put(AssistantEvent("error", f"Assistant stopped: {exc}"))
+
+    def poll_events(self) -> None:
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            self.handle_event(event)
+
+        if not self.closed:
+            self.root.after(50, self.poll_events)
+
+    def handle_event(self, event: AssistantEvent) -> None:
+        self.root.after_idle(self._handle_event_logic, event)
+
+    def _handle_event_logic(self, event: AssistantEvent) -> None:
+        if event.kind == "audio_data":
+            raw = event.value
+            if isinstance(raw, bytes):
+                samples = array.array("h")
+                samples.frombytes(raw[: len(raw) - (len(raw) % 2)])
+                self.pcm_buffer.extend(samples)
+            return
+
+        value = str(event.value)
+        if event.kind == "status":
+            self.set_status(value)
+        elif event.kind == "user_message":
+            self.add_message("You", value, "user")
+            self.set_status("Processing")
+        elif event.kind == "assistant_message":
+            self.add_message("Jarvis", value, "assistant")
+        elif event.kind == "error":
+            self.set_status("Error")
+            self.add_message("System", value, "system")
+        elif event.kind == "warning":
+            self.add_message("System", value, "system")
+        elif event.kind == "speaking":
+            if value == "start":
+                self.wave_mode = "assistant"
+                self.set_status("Speaking")
+            else:
+                self.wave_mode = "idle"
+                self.audio_strength = 0.0
+                self.set_status("Listening")
+        elif event.kind == "audio_level":
+            level = float(event.value)
+            self.audio_strength = max(self.audio_strength * 0.6, level)
+            if level > 0.02 and self.wave_mode != "assistant":
+                self.wave_mode = "user"
+                self.last_user_audio = time.monotonic()
+                if self.status not in {"Processing", "Speaking", "Error"}:
+                    self.set_status("Listening")
+
+    def set_status(self, status: str) -> None:
+        self.status = status
+        self.header.itemconfigure(self.status_text, text=status)
+        self.render_header()
+
+    def render_header(self, event=None) -> None:  # noqa: ANN001
+        width = max(1, self.header.winfo_width())
+        height = max(1, self.header.winfo_height())
+        self.header.delete("header_bg")
+        self.header.create_rectangle(0, 0, width, height, fill="#111827", outline="", tags="header_bg")
+        self.header.tag_lower("header_bg")
+        self.header.create_text(
+            18,
+            height / 2,
+            anchor="w",
+            text="Max",
+            fill="#f9fafb",
+            font=("Helvetica", 22, "bold"),
+            tags="header_bg",
+        )
+        self.header.coords(self.status_text, width - 18, height / 2)
+
+    def add_message(self, speaker: str, text: str, role: str) -> None:
+        self.transcript.append((speaker, text, role))
+        self.render_transcript()
+
+    def render_transcript(self) -> None:
         colors = {
             "user": ("#2563eb", "#ffffff", "e"),
             "assistant": ("#ffffff", "#111827", "w"),
             "system": ("#fee2e2", "#991b1b", "w"),
         }
-        bg, fg, anchor = colors[role]
-        row = self.tk.Frame(self.messages, bg="#f5f7fb")
-        row.pack(fill="x", pady=6)
+        canvas = self.transcript_canvas
+        canvas.delete("message")
 
-        bubble = self.tk.Frame(row, bg=bg, padx=14, pady=10)
-        bubble.pack(anchor=anchor, padx=8)
+        width = max(320, canvas.winfo_width())
+        max_bubble_width = max(260, min(520, width - 56))
+        y = 8
 
-        name = self.tk.Label(
-            bubble,
-            text=speaker,
-            bg=bg,
-            fg=fg,
-            font=("Helvetica", 10, "bold"),
-            anchor="w",
-        )
-        name.pack(fill="x")
+        for speaker, text, role in self.transcript:
+            bg, fg, anchor = colors[role]
+            lines = self.wrap_text(text, max(24, int(max_bubble_width / 8)))
+            line_height = 20
+            bubble_height = 34 + len(lines) * line_height
+            bubble_width = max(150, min(max_bubble_width, max(len(speaker), *(len(line) for line in lines)) * 8 + 32))
 
-        body = self.tk.Label(
-            bubble,
-            text=text,
-            bg=bg,
-            fg=fg,
-            justify="left",
-            wraplength=max(280, self.transcript_canvas.winfo_width() - 190),
-            font=("Helvetica", 13),
-        )
-        body.pack(fill="x")
+            if anchor == "e":
+                x1 = width - bubble_width - 18
+                x2 = width - 10
+            else:
+                x1 = 10
+                x2 = x1 + bubble_width
+            y1 = y
+            y2 = y + bubble_height
+
+            canvas.create_rectangle(x1, y1, x2, y2, fill=bg, outline="#e5e7eb", tags="message")
+            canvas.create_text(
+                x1 + 14,
+                y1 + 12,
+                anchor="nw",
+                text=speaker,
+                fill=fg,
+                font=("Helvetica", 10, "bold"),
+                tags="message",
+            )
+            canvas.create_text(
+                x1 + 14,
+                y1 + 34,
+                anchor="nw",
+                text="\n".join(lines),
+                fill=fg,
+                font=("Helvetica", 13),
+                width=bubble_width - 28,
+                tags="message",
+            )
+            y = y2 + 12
+
+        self.transcript_height = max(y, canvas.winfo_height())
+        canvas.configure(scrollregion=(0, 0, width, self.transcript_height))
         self.root.after_idle(self.scroll_to_bottom)
+
+    def wrap_text(self, text: str, max_chars: int) -> list[str]:
+        words = text.split()
+        if not words:
+            return [""]
+
+        lines: list[str] = []
+        current = words[0]
+        for word in words[1:]:
+            if len(current) + 1 + len(word) <= max_chars:
+                current += " " + word
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
 
     def animate_wave(self) -> None:
         width = max(1, self.wave.winfo_width())
         height = max(1, self.wave.winfo_height())
         self.wave.delete("all")
+        self.wave.create_rectangle(0, 0, width, height, fill="#111827", outline="")
 
-        if self.wave_mode == "user" and time.monotonic() - self.last_user_audio > 0.7:
+        if self.wave_mode == "user" and time.monotonic() - self.last_user_audio > 1.0:
             self.wave_mode = "idle"
+            self.audio_strength = 0.0
+
         if self.wave_mode == "idle":
-            self.audio_strength *= 0.82
+            self.audio_strength *= 0.85
 
         self.phase += 0.23
         center = height / 2
@@ -410,15 +786,31 @@ class JarvisUI:
             color = "#475569"
 
         points: list[float] = []
-        step = 8
-        for x in range(0, width + step, step):
-            progress = x / max(width, 1)
-            wave = math.sin((progress * math.pi * 4) + self.phase)
-            shimmer = math.sin((progress * math.pi * 11) - (self.phase * 0.7)) * 0.35
-            y = center + (wave + shimmer) * amplitude
-            points.extend([x, y])
+        step = max(4, int(width / 50))
 
-        self.wave.create_line(*points, fill=color, width=4, smooth=True, capstyle="round")
+        if self.wave_mode == "user" and self.pcm_buffer:
+            samples = list(self.pcm_buffer)
+            if len(samples) > 1:
+                for i in range(0, width, step):
+                    idx = int((i / width) * (len(samples) - 1))
+                    idx = min(idx, len(samples) - 1)
+                    s = samples[idx]
+                    y = center - (s / 32768) * amplitude
+                    points.extend([float(i), y])
+            else:
+                points = []
+
+        if self.wave_mode != "user" or not self.pcm_buffer:
+            points = []
+            for x in range(0, width + step, step):
+                progress = x / max(width, 1)
+                wave = math.sin((progress * math.pi * 4) + self.phase)
+                shimmer = math.sin((progress * math.pi * 11) - (self.phase * 0.7)) * 0.35
+                y = center + (wave * 0.6 + shimmer * 0.3) * amplitude
+                points.extend([float(x), y])
+
+        if len(points) >= 4:
+            self.wave.create_line(*points, fill=color, width=4, smooth=True, capstyle="round")
         self.wave.create_text(
             18,
             18,
@@ -446,14 +838,13 @@ class JarvisUI:
             return "Listening"
         return self.status
 
-    def on_messages_configure(self, event) -> None:  # noqa: ANN001
-        self.transcript_canvas.configure(scrollregion=self.transcript_canvas.bbox("all"))
-
     def on_canvas_configure(self, event) -> None:  # noqa: ANN001
-        self.transcript_canvas.itemconfigure(self.messages_window, width=event.width)
+        self.render_transcript()
 
     def scroll_to_bottom(self) -> None:
-        self.transcript_canvas.configure(scrollregion=self.transcript_canvas.bbox("all"))
+        width = max(320, self.transcript_canvas.winfo_width())
+        height = max(self.transcript_height, self.transcript_canvas.winfo_height())
+        self.transcript_canvas.configure(scrollregion=(0, 0, width, height))
         self.transcript_canvas.yview_moveto(1.0)
 
     def close(self) -> None:
@@ -562,7 +953,7 @@ def parse_args() -> Config:
     parser.add_argument(
         "--console",
         action="store_true",
-        help="Use the original terminal transcript instead of the Tkinter UI.",
+        help="Use the original terminal transcript instead of the desktop UI.",
     )
     args = parser.parse_args()
     llm_model = args.llm_model or args.ollama_model
@@ -607,8 +998,7 @@ def main() -> int:
         try:
             ui = JarvisUI(assistant, events)
         except ModuleNotFoundError as exc:
-            missing_package = exc.name or "tkinter"
-            print(f"Missing UI dependency: {missing_package}", file=sys.stderr)
+            print(str(exc), file=sys.stderr)
             assistant.stop()
             return 1
 

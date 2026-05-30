@@ -42,10 +42,29 @@ except ModuleNotFoundError:
 class TextSpeaker:
     def __init__(self) -> None:
         self.macos_say = shutil.which("say")
+        self.lock = threading.Lock()
+        self.current_process: subprocess.Popen[bytes] | None = None
+        self.current_engine: Any | None = None
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, stop_event: threading.Event | None = None) -> None:
         if self.macos_say:
-            subprocess.run([self.macos_say, text], check=False)
+            process = subprocess.Popen([self.macos_say, text])
+            with self.lock:
+                self.current_process = process
+            try:
+                while process.poll() is None:
+                    if stop_event is not None and stop_event.is_set():
+                        process.terminate()
+                        try:
+                            process.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                        return
+                    time.sleep(0.05)
+            finally:
+                with self.lock:
+                    if self.current_process is process:
+                        self.current_process = None
             return
 
         if pyttsx3 is None:
@@ -53,11 +72,31 @@ class TextSpeaker:
             return
 
         speaker = pyttsx3.init()
+        with self.lock:
+            self.current_engine = speaker
         try:
+            if stop_event is not None and stop_event.is_set():
+                return
             speaker.say(text)
             speaker.runAndWait()
         finally:
             speaker.stop()
+            with self.lock:
+                if self.current_engine is speaker:
+                    self.current_engine = None
+
+    def stop(self) -> None:
+        with self.lock:
+            process = self.current_process
+            engine = self.current_engine
+        if process is not None and process.poll() is None:
+            process.terminate()
+        if engine is not None:
+            engine.stop()
+
+
+class AssistantInterrupted(Exception):
+    """Raised when the user cancels the current response."""
 
 
 @dataclass(frozen=True)
@@ -90,6 +129,10 @@ class JarvisAssistant:
         self.speaking = threading.Event()
         self.listening_enabled = threading.Event()
         self.listening_enabled.set()
+        self.interrupt_requested = threading.Event()
+        self.responding = threading.Event()
+        self.response_lock = threading.Lock()
+        self.current_response: Any | None = None
 
     def audio_callback(self, indata: bytes, frames: int, time, status) -> None:  # noqa: ANN001
         if status:
@@ -129,16 +172,38 @@ class JarvisAssistant:
             self.respond_to(text)
 
     def respond_to(self, prompt: str) -> None:
+        self.interrupt_requested.clear()
+        self.responding.set()
         self.emit("status", "Processing")
         try:
             response = self.ask_llm(prompt)
+        except AssistantInterrupted:
+            self.emit("interrupted", "Response interrupted.")
+            self.emit("status", "Listening" if self.listening_enabled.is_set() else "Paused")
+            return
         except requests.RequestException as exc:
+            if self.interrupt_requested.is_set():
+                self.emit("interrupted", "Response interrupted.")
+                self.emit("status", "Listening" if self.listening_enabled.is_set() else "Paused")
+                return
             fallback = "I could not reach the local language model."
             self.emit("error", f"LLM request failed: {exc}")
             self.emit("assistant_message", fallback)
             self.say(fallback)
             return
+        except Exception:
+            if self.interrupt_requested.is_set():
+                self.emit("interrupted", "Response interrupted.")
+                self.emit("status", "Listening" if self.listening_enabled.is_set() else "Paused")
+                return
+            raise
+        finally:
+            self.responding.clear()
 
+        if self.interrupt_requested.is_set():
+            self.emit("interrupted", "Response interrupted.")
+            self.emit("status", "Listening" if self.listening_enabled.is_set() else "Paused")
+            return
         self.emit("assistant_message", response)
         self.say(response)
         self.emit("status", "Listening" if self.listening_enabled.is_set() else "Paused")
@@ -163,13 +228,25 @@ class JarvisAssistant:
         endpoint = self.config.llm_url.rstrip("/") + "/api/chat"
         payload = {
             "model": self.config.llm_model,
-            "stream": False,
+            "stream": True,
             "messages": self.chat_messages(prompt),
         }
-        response = requests.post(endpoint, json=payload, timeout=self.config.timeout)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("message", {}).get("content", "").strip() or "I have no response."
+        chunks: list[str] = []
+        with requests.post(endpoint, json=payload, timeout=self.config.timeout, stream=True) as response:
+            self.set_current_response(response)
+            try:
+                response.raise_for_status()
+                for line in response.iter_lines(decode_unicode=True):
+                    self.raise_if_interrupted()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    chunks.append(data.get("message", {}).get("content", ""))
+                    if data.get("done"):
+                        break
+            finally:
+                self.clear_current_response(response)
+        return "".join(chunks).strip() or "I have no response."
 
     def ask_lmstudio(self, prompt: str) -> str:
         endpoint = self.config.llm_url.rstrip("/") + "/v1/chat/completions"
@@ -177,27 +254,43 @@ class JarvisAssistant:
             "model": self.config.llm_model,
             "messages": self.chat_messages(prompt),
             "temperature": 0.7,
-            "stream": False,
+            "stream": True,
         }
-        response = requests.post(endpoint, json=payload, timeout=self.config.timeout)
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices", [])
-        if choices:
-            return choices[0].get("message", {}).get("content", "").strip() or "I have no response."
-        return "I have no response."
+        chunks: list[str] = []
+        with requests.post(endpoint, json=payload, timeout=self.config.timeout, stream=True) as response:
+            self.set_current_response(response)
+            try:
+                response.raise_for_status()
+                for line in response.iter_lines(decode_unicode=True):
+                    self.raise_if_interrupted()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    payload_text = line.removeprefix("data:").strip()
+                    if payload_text == "[DONE]":
+                        break
+                    data = json.loads(payload_text)
+                    choices = data.get("choices", [])
+                    if choices:
+                        chunks.append(choices[0].get("delta", {}).get("content", ""))
+            finally:
+                self.clear_current_response(response)
+        return "".join(chunks).strip() or "I have no response."
 
     def say(self, text: str) -> None:
+        if self.interrupt_requested.is_set():
+            return
         self.speaking.set()
         self.emit("speaking", "start")
         try:
-            self.speaker.say(text)
+            self.speaker.say(text, self.interrupt_requested)
         finally:
             time.sleep(0.25)
             self.discard_pending_audio()
             self.recognizer.Reset()
             self.speaking.clear()
             self.emit("speaking", "stop")
+            if self.interrupt_requested.is_set():
+                self.emit("interrupted", "Response interrupted.")
 
     def set_listening_enabled(self, enabled: bool) -> None:
         if enabled:
@@ -222,8 +315,44 @@ class JarvisAssistant:
     def is_listening_enabled(self) -> bool:
         return self.listening_enabled.is_set()
 
+    def is_busy(self) -> bool:
+        return self.responding.is_set() or self.speaking.is_set()
+
+    def interrupt(self) -> bool:
+        if not self.is_busy():
+            return False
+        self.interrupt_requested.set()
+        with self.response_lock:
+            response = self.current_response
+        if response is not None:
+            response.close()
+        self.speaker.stop()
+        self.discard_pending_audio()
+        self.recognizer.Reset()
+        self.emit("status", "Interrupting")
+        return True
+
+    def raise_if_interrupted(self) -> None:
+        if self.interrupt_requested.is_set():
+            raise AssistantInterrupted
+
+    def set_current_response(self, response: Any) -> None:
+        with self.response_lock:
+            self.current_response = response
+
+    def clear_current_response(self, response: Any) -> None:
+        with self.response_lock:
+            if self.current_response is response:
+                self.current_response = None
+
     def stop(self) -> None:
         self.running = False
+        self.interrupt_requested.set()
+        with self.response_lock:
+            response = self.current_response
+        if response is not None:
+            response.close()
+        self.speaker.stop()
         self.audio_queue.put(b"")
 
     def discard_pending_audio(self) -> None:
@@ -246,6 +375,8 @@ class JarvisAssistant:
             print(f"Heard: {value}")
         elif kind == "assistant_message":
             print(f"Jarvis: {value}")
+        elif kind == "interrupted":
+            print(value)
         elif kind in {"error", "warning"}:
             print(value, file=sys.stderr)
 
@@ -357,7 +488,33 @@ class JarvisUI:
         )
         self.listen_button.clicked.connect(self.toggle_listening)
         header_layout.addWidget(self.listen_button)
+
+        self.interrupt_button = QtWidgets.QPushButton("Interrupt")
+        self.interrupt_button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.interrupt_button.setToolTip("Stop the current Jarvis response")
+        self.interrupt_button.setStyleSheet(
+            """
+            QPushButton {
+                background: #dc2626;
+                color: #ffffff;
+                border: 0;
+                padding: 7px 12px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QPushButton:hover:enabled {
+                background: #b91c1c;
+            }
+            QPushButton:disabled {
+                background: #9ca3af;
+                color: #e5e7eb;
+            }
+            """
+        )
+        self.interrupt_button.clicked.connect(self.interrupt_response)
+        header_layout.addWidget(self.interrupt_button)
         self.update_listen_button()
+        self.update_interrupt_button()
         shell.addWidget(header)
 
         self.wave = WaveWidget(self)
@@ -422,6 +579,11 @@ class JarvisUI:
             self.set_status("Processing")
         elif event.kind == "assistant_message":
             self.add_message("Jarvis", value, "assistant")
+        elif event.kind == "interrupted":
+            self.wave_mode = "idle"
+            self.audio_strength = 0.0
+            self.add_message("System", value, "system")
+            self.set_status("Listening" if self.assistant.is_listening_enabled() else "Paused")
         elif event.kind == "error":
             self.set_status("Error")
             self.add_message("System", value, "system")
@@ -454,9 +616,14 @@ class JarvisUI:
         self.status = status
         self.status_label.setText(status)
         self.update_listen_button()
+        self.update_interrupt_button()
 
     def toggle_listening(self) -> None:
         self.assistant.toggle_listening()
+
+    def interrupt_response(self) -> None:
+        if self.assistant.interrupt():
+            self.update_interrupt_button()
 
     def update_listen_button(self) -> None:
         if self.assistant.is_listening_enabled():
@@ -465,6 +632,9 @@ class JarvisUI:
         else:
             self.listen_button.setText("Start listening")
             self.listen_button.setToolTip("Resume microphone recognition")
+
+    def update_interrupt_button(self) -> None:
+        self.interrupt_button.setEnabled(self.status in {"Processing", "Speaking", "Interrupting"})
 
     def add_message(self, speaker: str, text: str, role: str) -> None:
         QtCore = self.QtCore

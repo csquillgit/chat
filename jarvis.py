@@ -527,8 +527,8 @@ class JarvisUI:
 
         self.messages = QtWidgets.QWidget()
         self.messages_layout = QtWidgets.QVBoxLayout(self.messages)
-        self.messages_layout.setContentsMargins(0, 0, 0, 0)
-        self.messages_layout.setSpacing(12)
+        self.messages_layout.setContentsMargins(2, 4, 2, 4)
+        self.messages_layout.setSpacing(10)
         self.messages_layout.addStretch(1)
         self.scroll_area.setWidget(self.messages)
         shell.addWidget(self.scroll_area, 1)
@@ -638,36 +638,72 @@ class JarvisUI:
 
     def add_message(self, speaker: str, text: str, role: str) -> None:
         QtCore = self.QtCore
+        QtGui = self.QtGui
         QtWidgets = self.QtWidgets
-        colors = {
-            "user": ("#2563eb", "#ffffff", QtCore.Qt.AlignmentFlag.AlignRight),
-            "assistant": ("#ffffff", "#111827", QtCore.Qt.AlignmentFlag.AlignLeft),
-            "system": ("#fee2e2", "#991b1b", QtCore.Qt.AlignmentFlag.AlignLeft),
+        styles = {
+            "user": {
+                "bg": "#2563eb",
+                "fg": "#ffffff",
+                "meta": "#dbeafe",
+                "border": "#1d4ed8",
+                "alignment": QtCore.Qt.AlignmentFlag.AlignRight,
+            },
+            "assistant": {
+                "bg": "#ffffff",
+                "fg": "#111827",
+                "meta": "#64748b",
+                "border": "#e2e8f0",
+                "alignment": QtCore.Qt.AlignmentFlag.AlignLeft,
+            },
+            "system": {
+                "bg": "#fff1f2",
+                "fg": "#991b1b",
+                "meta": "#be123c",
+                "border": "#fecdd3",
+                "alignment": QtCore.Qt.AlignmentFlag.AlignLeft,
+            },
         }
-        bg, fg, alignment = colors[role]
+        style = styles[role]
 
         row = QtWidgets.QWidget()
         row_layout = QtWidgets.QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setContentsMargins(2, 1, 2, 1)
 
         bubble = QtWidgets.QFrame()
-        bubble.setMaximumWidth(520)
-        bubble.setStyleSheet(f"background: {bg}; border: 1px solid #e5e7eb;")
+        bubble.setObjectName("messageBubble")
+        bubble.setMaximumWidth(540)
+        bubble.setStyleSheet(
+            f"""
+            QFrame#messageBubble {{
+                background: {style["bg"]};
+                border: 1px solid {style["border"]};
+                border-radius: 18px;
+            }}
+            """
+        )
+        shadow = QtWidgets.QGraphicsDropShadowEffect(bubble)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QtGui.QColor(15, 23, 42, 24))
+        bubble.setGraphicsEffect(shadow)
+
         bubble_layout = QtWidgets.QVBoxLayout(bubble)
-        bubble_layout.setContentsMargins(14, 10, 14, 10)
-        bubble_layout.setSpacing(4)
+        bubble_layout.setContentsMargins(16, 11, 16, 12)
+        bubble_layout.setSpacing(5)
 
         name = QtWidgets.QLabel(speaker)
-        name.setStyleSheet(f"background: {bg}; color: {fg}; font-size: 10px; font-weight: 700;")
+        name.setStyleSheet(
+            f"background: transparent; color: {style['meta']}; font-size: 10px; font-weight: 700;"
+        )
         bubble_layout.addWidget(name)
 
         body = QtWidgets.QLabel(text)
         body.setWordWrap(True)
         body.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        body.setStyleSheet(f"background: {bg}; color: {fg}; font-size: 13px;")
+        body.setStyleSheet(f"background: transparent; color: {style['fg']}; font-size: 13px;")
         bubble_layout.addWidget(body)
 
-        if alignment == QtCore.Qt.AlignmentFlag.AlignRight:
+        if style["alignment"] == QtCore.Qt.AlignmentFlag.AlignRight:
             row_layout.addStretch(1)
             row_layout.addWidget(bubble)
         else:

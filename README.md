@@ -1,6 +1,6 @@
-# Max Local Voice Assistant
+# Jarvis Local Voice Assistant
 
-This Python app listens for the wake words `Hey Max`, records the next spoken phrase, sends it to a local LLM server, and speaks the response back.
+This Python app listens continuously while it is running, sends recognized speech to a local LLM server, and speaks the response back. By default it opens a small desktop UI with a live transcript, status updates, and an animated audio wave.
 
 It supports Ollama and LM Studio as local LLM backends. On macOS, spoken responses use the built-in `say` command. On other platforms, the app falls back to `pyttsx3`.
 
@@ -41,7 +41,7 @@ ollama your-loaded-model-id
 ollama serve
 ```
 
-In another terminal, start Max:
+In another terminal, start Jarvis:
 
 ```bash
 python3 jarvis.py \
@@ -59,7 +59,7 @@ In LM Studio:
 2. Start the local server from the Developer tab.
 3. Copy the model identifier shown by LM Studio.
 
-Then start Max:
+Then start Jarvis:
 
 ```bash
 python3 jarvis.py \
@@ -69,8 +69,20 @@ python3 jarvis.py \
   --vosk-model ./vosk-model-small-en-us-0.15
 ```
 
-Say `Hey Max`, wait for `Yes?`, then ask your question.
-You can also just say the prompt in one phrase, such as `Hey Max what time is it`.
+Once the app is running, speak your prompt directly. The desktop window shows what it heard, the model response, and voice activity while you or Jarvis are speaking.
+
+Use the Interrupt button to stop the current Jarvis response before it finishes.
+
+To use the original terminal transcript instead of the desktop UI, add `--console`:
+
+```bash
+python3 jarvis.py \
+  --console \
+  --llm-provider lmstudio \
+  --llm-url http://localhost:1234 \
+  --llm-model your-loaded-model-id \
+  --vosk-model ./vosk-model-small-en-us-0.15
+```
 
 ## Useful Options
 

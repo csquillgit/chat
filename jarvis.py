@@ -145,6 +145,7 @@ class JarvisAssistant:
         self.audio_queue.put(data)
 
     def listen(self) -> Iterable[str]:
+        validate_input_device(self.config.device, self.config.sample_rate)
         with sd.RawInputStream(
             samplerate=self.config.sample_rate,
             blocksize=8000,
@@ -842,6 +843,41 @@ def resolve_vosk_model_path(model_path: str) -> Path:
 
 def is_vosk_model_dir(path: Path) -> bool:
     return path.is_dir() and all((path / name).exists() for name in ("am", "conf", "graph"))
+
+
+def validate_input_device(device: int | None, sample_rate: int) -> None:
+    try:
+        details = sd.query_devices(device, "input")
+    except Exception as exc:  # noqa: BLE001
+        device_label = "the default input device" if device is None else f"device {device}"
+        raise RuntimeError(
+            f"Could not use {device_label} as a microphone input: {exc}\n"
+            "List available audio devices with: python3 -m sounddevice"
+        ) from exc
+
+    max_input_channels = int(details.get("max_input_channels", 0))
+    if max_input_channels < 1:
+        name = details.get("name", device)
+        raise RuntimeError(
+            f"Selected audio device {device} ({name}) has no input channels.\n"
+            "Choose a microphone/input device from: python3 -m sounddevice"
+        )
+
+    try:
+        sd.check_input_settings(
+            device=device,
+            samplerate=sample_rate,
+            channels=1,
+            dtype="int16",
+        )
+    except Exception as exc:  # noqa: BLE001
+        name = details.get("name", "default input")
+        default_rate = details.get("default_samplerate")
+        rate_hint = f" Its default sample rate is {int(default_rate)} Hz." if default_rate else ""
+        raise RuntimeError(
+            f"Selected audio device {device} ({name}) cannot open mono input at {sample_rate} Hz: {exc}\n"
+            f"{rate_hint} Try a different --device or pass a compatible --sample-rate."
+        ) from exc
 
 
 def parse_args() -> Config:
